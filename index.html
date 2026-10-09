@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智慧庫存管理系統 (SPA)</title>
+    <!-- Tailwind CSS & FontAwesome -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <!-- QRCode.js & Html5-QRCode Scanner -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <style>
+        [v-cloak] { display: none; }
+        .tab-active { border-bottom: 3px solid #3b82f6; color: #1d4ed8; font-weight: bold; }
+        @media print {
+            body * { visibility: hidden; }
+            #printable-area, #printable-area * { visibility: visible; }
+            #printable-area { position: absolute; left: 0; top: 0; width: 100%; }
+            .no-print { display: none !important; }
+        }
+    </style>
+</head>
+<body class="bg-slate-100 font-sans min-h-screen text-slate-800">
+    <div id="app" v-cloak class="max-w-7xl mx-auto p-4 sm:p-6">
+        
+        <!-- Header -->
+        <header class="bg-white rounded-xl shadow-md p-4 mb-6 flex flex-col md:flex-row justify-between items-center gap-4">
+            <div class="flex items-center gap-3">
+                <div class="bg-blue-600 text-white p-3 rounded-lg shadow">
+                    <i class="fa-solid fa-boxes-stacked text-2xl"></i>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold text-slate-800">智慧庫存管理系統</h1>
+                    <p class="text-xs text-slate-500">主-子-流水-包裝 自動編碼 • 單件加權平均成本 • 相機掃描出入庫</p>
+                </div>
+            </div>
+            
+            <div class="flex items-center gap-3">
+                <span class="text-xs text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full border">
+                    <i class="fa-solid fa-cloud-arrow-up text-green-500 mr-1"></i>
+                    自動存檔: {{ lastSaveTime || '已就緒' }}
+                </span>
+            </div>
+        </header>
+
+        <!-- Navigation Tabs -->
+        <div class="bg-white rounded-xl shadow-sm mb-6 p-2 flex flex-wrap gap-2 border-b">
+            <button @click="currentTab = 'inventory'" :class="{'tab-active': currentTab === 'inventory'}" class="px-4 py-2.5 text-sm font-medium rounded-lg hover:bg-slate-50 transition flex items-center gap-2">
+                <i class="fa-solid fa-list-check"></i> 商品庫存列表
+            </button>
+            <button @click="currentTab = 'inbound'" :class="{'tab-active': currentTab === 'inbound'}" class="px-4 py-2.5 text-sm font-medium rounded-lg hover:bg-slate-50 transition flex items-center gap-2">
+                <i class="fa-solid fa-truck-ramp-box"></i> 📥 入庫登記 (單件/加權成本)
+            </button>
+            <button @click="currentTab = 'outbound'" :class="{'tab-active': currentTab === 'outbound'}" class="px-4 py-2.5 text-sm font-medium rounded-lg hover:bg-slate-50 transition flex items-center gap-2 relative">
+                <i class="fa-solid fa-cart-shopping"></i> 📤 出庫結帳 / POS
+                <span v-if="cart.length" class="bg-red-500 text-white text-xs px-2 py-0.5 rounded-full ml-1 font-bold">{{ cartTotalCount }}</span>
+            </button>
+            <button @click="currentTab = 'history'" :class="{'tab-active': currentTab === 'history'}" class="px-4 py-2.5 text-sm font-medium rounded-lg hover:bg-slate-50 transition flex items-center gap-2">
+                <i class="fa-solid fa-clock-rotate-left"></i> 出庫紀錄 (單據/貼紙補印)
+            </button>
+            <button @click="currentTab = 'settings'" :class="{'tab-active': currentTab === 'settings'}" class="px-4 py-2.5 text-sm font-medium rounded-lg hover:bg-slate-50 transition flex items-center gap-2">
+                <i class="fa-solid fa-sliders"></i> ⚙️ 類別與規格管理
+            </button>
+        </div>
+
+        <!-- Toast -->
+        <div v-if="toast.show" class="fixed bottom-5 right-5 z-50 bg-slate-800 text-white px-5 py-3 rounded-lg shadow-2xl flex items-center gap-3 transition-all">
+            <i :class="toast.icon || 'fa-solid fa-circle-info'" class="text-yellow-400 text-lg"></i>
+            <span>{{ toast.msg }}</span>
+        </div>
+
+        <!-- 1. INVENTORY LIST TAB -->
+        <div v-if="currentTab === 'inventory'" class="space-y-4">
+            <div class="bg-white p-4 rounded-xl shadow-sm flex flex-col md:flex-row justify-between gap-4 items-center">
+                <div class="flex flex-wrap gap-2 w-full md:w-auto">
+                    <input v-model="searchQuery" placeholder="搜尋商品名稱或自動編碼 (例: 01-01-001-0)..." class="border rounded-lg px-3 py-2 text-sm w-full sm:w-72 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <select v-model="selectedCategoryFilter" class="border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">全部分類</option>
+                        <option v-for="cat in categories" :key="cat.id" :value="cat.name">{{ cat.name }}</option>
+                        <option value="未分類">未分類</option>
+                    </select>
+                </div>
+
+                <div class="flex items-center gap-2 w-full md:w-auto justify-end">
+                    <button v-if="selectedProducts.length > 0" @click="bulkDeleteProducts" class="bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-lg shadow transition flex items-center gap-1 font-bold">
+                        <i class="fa-solid fa-trash-can"></i> 刪除所選商品 ({{ selectedProducts.length }})
+                    </button>
+                    <button @click="openProductModal()" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg shadow transition flex items-center gap-1 font-bold">
+                        <i class="fa-solid fa-plus"></i> 新增商品
+                    </button>
+                </div>
+            </div>
+
+            <!-- Product Table -->
+            <div class="bg-white rounded-xl shadow-sm overflow-hidden border">
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-50 border-b text-slate-600 font-semibold">
+                            <tr>
+                                <th class="p-3.5 w-10 text-center">
+                                    <input type="checkbox" @change="toggleSelectAll" :checked="isAllSelected" class="rounded">
+                                </th>
+                                <th class="p-3.5">商品名稱 / 主編碼</th>
+                                <th class="p-3.5">分類 / 子分類 / 儲位</th>
+                                <th class="p-3.5">基本單位 / 庫存 / 單賣價</th>
+                                <th class="p-3.5">加權歷史平均成本</th>
+                                <th class="p-3.5">多包裝規格階層 (含包裝編碼)</th>
+                                <th class="p-3.5 text-center">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y">
+                            <tr v-for="prod in filteredProducts" :key="prod.id" class="hover:bg-slate-50 transition">
+                                <td class="p-3.5 text-center">
+                                    <input type="checkbox" :value="prod.id" v-model="selectedProducts" class="rounded">
+                                </td>
+                                <td class="p-3.5">
+                                    <div class="font-bold text-slate-800">{{ prod.name }}</div>
+                                    <div class="text-xs text-blue-600 font-mono font-bold mt-0.5">
+                                        {{ getAutoCode(prod, null) }}
+                                        <span class="text-[10px] bg-blue-50 text-blue-600 px-1 py-0.2 rounded border border-blue-200">基本件 (包裝0)</span>
+                                    </div>
+                                </td>
+                                <td class="p-3.5">
+                                    <span :class="prod.category === '未分類' ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-700'" class="px-2 py-0.5 rounded text-xs font-medium">
+                                        {{ prod.category }}
+                                    </span>
+                                    <span v-if="prod.subcategory" class="text-xs text-slate-400 ml-1">/ {{ prod.subcategory }}</span>
+                                    <div v-if="prod.storageTag" class="text-xs text-slate-500 mt-1"><i class="fa-solid fa-location-dot"></i> {{ prod.storageTag }}</div>
+                                </td>
+                                <td class="p-3.5">
+                                    <div class="font-semibold text-slate-700">{{ prod.stock }} {{ prod.baseUnit }}</div>
+                                    <div class="text-xs text-emerald-600 font-bold">單賣價: ${{ prod.basePrice || 0 }}</div>
+                                </td>
+                                <td class="p-3.5">
+                                    <div class="font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded inline-block text-xs">
+                                        ${{ (prod.avgCost || 0).toFixed(1) }} / {{ prod.baseUnit }}
+                                    </div>
+                                </td>
+                                <td class="p-3.5">
+                                    <div v-if="prod.restrictBulkOnly" class="text-xs text-red-600 font-bold bg-red-50 p-1 rounded inline-block mb-1">
+                                        🚫 限制不可拆箱/散賣
+                                    </div>
+                                    <div class="space-y-1">
+                                        <div v-for="(pkg, pIdx) in prod.packageTiers" :key="pkg.id" class="text-xs bg-slate-100 px-2 py-1 rounded flex items-center justify-between gap-2 border">
+                                            <div>
+                                                <span class="font-medium text-slate-800">{{ pkg.name }} ({{ pkg.ratio }}{{ prod.baseUnit }})</span>
+                                                <span class="block text-[10px] font-mono text-slate-500">{{ getAutoCode(prod, pkg, pIdx + 1) }}</span>
+                                            </div>
+                                            <span class="font-bold text-blue-600">${{ pkg.price }}</span>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="p-3.5 text-center">
+                                    <div class="flex justify-center items-center gap-1.5">
+                                        <button @click="openProductModal(prod)" class="bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs px-2.5 py-1.5 rounded transition">✏️ 編輯</button>
+                                        <button @click="deleteProduct(prod.id)" class="bg-red-100 hover:bg-red-200 text-red-700 text-xs px-2.5 py-1.5 rounded transition font-medium">🗑️ 刪除</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 2. INBOUND TAB (With Search & Standardized to Base Unit) -->
+        <div v-if="currentTab === 'inbound'" class="bg-white rounded-xl shadow-sm p-6 border max-w-2xl mx-auto space-y-5">
+            <div class="flex justify-between items-center border-b pb-3">
+                <h2 class="text-lg font-bold text-slate-800 flex items-center gap-2">
+                    <i class="fa-solid fa-truck-ramp-box text-blue-600"></i> 📥 專屬進貨 / 入庫登記 (一律單件算)
+                </h2>
+                <button @click="startScanner('inbound')" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1.5 rounded-lg font-bold flex items-center gap-1 shadow">
+                    <i class="fa-solid fa-qrcode"></i> 📷 掃描條碼/QR 入庫
+                </button>
+            </div>
+
+            <!-- Scanner Box -->
+            <div v-show="isScanning" class="p-4 bg-slate-900 rounded-xl space-y-2">
+                <div id="reader" class="w-full rounded-lg overflow-hidden"></div>
+                <button @click="stopScanner" class="w-full bg-red-600 text-white text-xs py-1.5 rounded-lg font-bold">關閉相機</button>
+            </div>
+
+            <div class="space-y-4">
+                <!-- Product Search Filter for Inbound -->
+                <div>
+                    <label class="block text-xs font-bold text-slate-500 mb-1">🔍 快速搜尋商品名稱或自動編碼：</label>
+                    <input v-model="inboundSearch" placeholder="關鍵字快速過濾..." class="w-full border rounded-lg p-2 text-sm bg-slate-50 mb-2 focus:bg-white focus:ring-2 focus:ring-blue-500">
+                    
+                    <label class="block text-sm font-medium mb-1">選擇進貨商品 <span class="text-red-500">*</span></label>
+                    <select v-model="inboundForm.productId" class="w-full border rounded-lg p-2.5 text-sm bg-white">
+                        <option value="">-- 請選擇商品 --</option>
+                        <option v-for="p in inboundFilteredProducts" :key="p.id" :value="p.id">
+                            [{{ getAutoCode(p, null) }}] {{ p.name }} (現有: {{ p.stock }} {{ p.baseUnit }} | 當前成本: ${{ (p.avgCost || 0).toFixed(1) }})
+                        </option>
+                    </select>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium mb-1">本次進貨單件數量 <span class="text-red-500">*</span></label>
+                        <div class="flex items-center">
+                            <input type="number" min="1" v-model.number="inboundForm.qty" class="w-full border rounded-l-lg p-2.5 text-sm">
+                            <span class="bg-slate-100 border border-l-0 rounded-r-lg px-3 py-2.5 text-xs text-slate-500 font-bold shrink-0">
+                                {{ selectedInboundProduct ? selectedInboundProduct.baseUnit : '件' }}
+                            </span>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">本次進貨總金額 ($) <span class="text-red-500">*</span></label>
+                        <input type="number" min="0" v-model.number="inboundForm.totalCost" placeholder="總代價" class="w-full border rounded-lg p-2.5 text-sm">
+                    </div>
+                </div>
+
+                <!-- Live Cost Preview -->
+                <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-2" v-if="selectedInboundProduct">
+                    <div class="flex justify-between items-center text-xs text-blue-900 font-medium">
+                        <span>本次單件進貨成本：</span>
+                        <span class="font-bold text-sm text-blue-700">${{ calculatedCurrentUnitCost.toFixed(2) }} / {{ selectedInboundProduct.baseUnit }}</span>
+                    </div>
+                    <div class="flex justify-between items-center text-sm font-bold text-indigo-900 border-t border-blue-200 pt-2">
+                        <span>更新後加權歷史平均成本：</span>
+                        <span class="text-lg text-indigo-700">${{ calculatedNewAvgCost.toFixed(2) }} / {{ selectedInboundProduct.baseUnit }}</span>
+                    </div>
+                </div>
+
+                <button @click="submitInbound" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg shadow transition">
+                    確認單件入庫並更新歷史平均成本
+                </button>
+            </div>
+        </div>
+
+        <!-- 3. OUTBOUND TAB -->
+        <div v-if="currentTab === 'outbound'" class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div class="lg:col-span-2 space-y-4">
+                <div class="flex gap-2">
+                    <input v-model="outboundSearch" placeholder="搜尋可售商品名稱或編碼..." class="w-full border rounded-lg p-3 text-sm bg-white shadow-sm">
+                    <button @click="startScanner('outbound')" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-4 py-2 rounded-lg font-bold shrink-0 flex items-center gap-1 shadow">
+                        <i class="fa-solid fa-qrcode"></i> 📷 相機掃描
+                    </button>
+                </div>
+
+                <!-- Scanner Box -->
+                <div v-show="isScanning" class="p-4 bg-slate-900 rounded-xl space-y-2">
+                    <div id="reader" class="w-full rounded-lg overflow-hidden"></div>
+                    <button @click="stopScanner" class="w-full bg-red-600 text-white text-xs py-1.5 rounded-lg font-bold">關閉相機</button>
+                </div>
+
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    <div v-for="p in outboundFilteredProducts" :key="p.id" class="bg-white p-3.5 rounded-xl border hover:border-blue-500 shadow-sm transition">
+                        <div class="font-bold text-slate-800 text-sm">{{ p.name }}</div>
+                        <div class="text-[11px] text-blue-600 font-mono font-bold">{{ getAutoCode(p, null) }}</div>
+                        <div class="text-xs text-slate-400 mt-0.5">庫存: {{ p.stock }} {{ p.baseUnit }}</div>
+                        
+                        <div class="mt-3 space-y-1.5">
+                            <button v-if="!p.restrictBulkOnly" @click="addToCart(p, null, 0)" class="w-full bg-slate-100 hover:bg-blue-50 hover:text-blue-600 text-xs py-1.5 px-2 rounded flex justify-between items-center">
+                                <span>單件散賣 (${{ p.basePrice || 0 }})</span>
+                                <span class="font-bold">+</span>
+                            </button>
+                            <button v-for="(tier, tIdx) in p.packageTiers" :key="tier.id" @click="addToCart(p, tier, tIdx + 1)" class="w-full bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs py-1.5 px-2 rounded flex justify-between items-center font-medium">
+                                <span>{{ tier.name }} (${{ tier.price }})</span>
+                                <span class="font-bold">+</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cart -->
+            <div class="bg-white rounded-xl shadow-sm p-4 border flex flex-col justify-between h-[600px]">
+                <div>
+                    <h2 class="font-bold text-slate-800 pb-3 border-b flex justify-between items-center">
+                        <span>🛒 出庫購物車草稿</span>
+                        <button v-if="cart.length" @click="cart = []" class="text-xs text-red-500 hover:underline">清空</button>
+                    </h2>
+                    <div class="divide-y overflow-y-auto max-h-[400px] mt-2">
+                        <div v-for="(item, idx) in cart" :key="idx" class="py-3 flex justify-between items-center text-sm">
+                            <div>
+                                <div class="font-semibold text-slate-800">{{ item.name }}</div>
+                                <div class="text-xs text-slate-500">規格: {{ item.pkgName }} (${{ item.price }})</div>
+                                <div class="text-[10px] font-mono text-blue-600">{{ item.qrCodeStr }}</div>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button @click="updateCartQty(item, -1)" class="w-6 h-6 bg-slate-100 rounded font-bold">-</button>
+                                <span class="font-bold w-6 text-center">{{ item.qty }}</span>
+                                <button @click="updateCartQty(item, 1)" class="w-6 h-6 bg-slate-100 rounded font-bold">+</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="border-t pt-4 space-y-3">
+                    <div class="flex justify-between text-lg font-bold">
+                        <span>實收總計:</span>
+                        <span class="text-blue-600">${{ cartTotalPrice }}</span>
+                    </div>
+                    <button @click="checkout" :disabled="cart.length === 0" class="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold py-3 rounded-lg shadow transition">
+                        確認結帳 / 印出銷貨單據與 QR
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 4. HISTORY TAB -->
+        <div v-if="currentTab === 'history'" class="bg-white rounded-xl shadow-sm p-4 border">
+            <h2 class="text-base font-bold text-slate-800 mb-4">出庫歷史紀錄與單據補印</h2>
+            <table class="w-full text-left text-sm">
+                <thead class="bg-slate-50 border-b">
+                    <tr>
+                        <th class="p-3">單號 / 出貨日期</th>
+                        <th class="p-3">客戶名稱</th>
+                        <th class="p-3">實收總計</th>
+                        <th class="p-3 text-center">操作</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y">
+                    <tr v-for="rec in history" :key="rec.id">
+                        <td class="p-3 font-mono text-xs">
+                            <div class="font-bold text-slate-700">{{ rec.id }}</div>
+                            <div class="text-slate-400">{{ rec.dateStr }}</div>
+                        </td>
+                        <td class="p-3">{{ rec.customer || '一般客戶' }}</td>
+                        <td class="p-3 font-bold">${{ rec.totalPrice }}</td>
+                        <td class="p-3 text-center">
+                            <button @click="openReceiptModal(rec)" class="bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1.5 rounded shadow">
+                                🖨️ 檢視 / 補印單據貼紙
+                            </button>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 5. SETTINGS TAB -->
+        <div v-if="currentTab === 'settings'" class="bg-white p-5 rounded-xl shadow-sm border max-w-2xl mx-auto space-y-4">
+            <h2 class="font-bold text-slate-800 border-b pb-2">⚙️ 主類別與子類別管理 (影響自動編碼)</h2>
+            <div class="flex gap-2">
+                <input v-model="newCategoryName" placeholder="新增主類別名稱..." class="border rounded-lg p-2 text-sm flex-1">
+                <button @click="addCategory" class="bg-blue-600 text-white text-sm px-4 py-2 rounded-lg font-bold">新增</button>
+            </div>
+
+            <div class="space-y-3">
+                <div v-for="(cat, cIdx) in categories" :key="cat.id" class="border p-3.5 rounded-xl bg-slate-50 space-y-2">
+                    <div class="flex justify-between items-center font-bold">
+                        <span class="text-slate-800">
+                            <span class="font-mono text-blue-600 mr-1">[{{ pad2(cIdx + 1) }}]</span> {{ cat.name }}
+                        </span>
+                        <button @click="deleteCategory(cat.id)" class="text-red-500 hover:text-red-700 text-xs">🗑️ 刪除主類別</button>
+                    </div>
+                    <div class="pl-4 border-l-2 border-slate-200 space-y-1">
+                        <div v-for="(sub, sIdx) in cat.subcategories" :key="sIdx" class="flex justify-between items-center text-xs text-slate-600 bg-white p-1.5 rounded border">
+                            <span><span class="font-mono text-slate-400">[{{ pad2(sIdx + 1) }}]</span> {{ sub }}</span>
+                            <button @click="deleteSubcategory(cat, sub)" class="text-red-400 hover:text-red-600 font-bold">✕</button>
+                        </div>
+                        <div class="flex gap-2 mt-2">
+                            <input v-model="cat.tempSubName" placeholder="新增子類別..." class="border rounded p-1.5 text-xs flex-1 bg-white">
+                            <button @click="addSubcategory(cat)" class="bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs px-3 py-1.5 rounded font-bold">增加子類別</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- NEW/EDIT PRODUCT MODAL -->
+        <div v-if="showProductModal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl p-6 space-y-6 max-h-[90vh] overflow-y-auto">
+                <div class="flex justify-between items-center border-b pb-3">
+                    <h3 class="font-bold text-xl text-slate-800">{{ editingProduct.id ? '✏️ 編輯商品' : '➕ 新增商品' }}</h3>
+                    <button @click="showProductModal = false" class="text-slate-400 hover:text-slate-600 text-xl">✕</button>
+                </div>
+
+                <div class="space-y-4 text-sm">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block font-medium mb-1 text-slate-700">商品名稱 *</label>
+                            <input v-model="editingProduct.name" placeholder="例: 無印簡約雙層馬克杯" class="w-full border rounded-lg p-2.5 focus:ring-2 focus:ring-blue-500">
+                        </div>
+                        <div>
+                            <label class="block font-medium mb-1 text-slate-700">全自動產製條碼 / QR 編碼 (系統自動預覽)</label>
+                            <input :value="previewBaseCode" readonly class="w-full border rounded-lg p-2.5 bg-slate-100 text-blue-700 font-mono font-bold cursor-not-allowed">
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="block font-medium mb-1 text-slate-700">主類別 *</label>
+                            <select v-model="editingProduct.category" class="w-full border rounded-lg p-2.5 bg-white">
+                                <option value="未分類">未分類 (00)</option>
+                                <option v-for="c in categories" :key="c.id" :value="c.name">{{ c.name }}</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block font-medium mb-1 text-slate-700">子類別</label>
+                            <select v-model="editingProduct.subcategory" class="w-full border rounded-lg p-2.5 bg-white">
+                                <option value="">無子類別 (00)</option>
+                                <option v-for="s in availableSubcategories" :key="s" :value="s">{{ s }}</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block font-medium mb-1 text-slate-700">儲位 Tag</label>
+                            <input v-model="editingProduct.storageTag" placeholder="例: A-01-2" class="w-full border rounded-lg p-2.5">
+                        </div>
+                    </div>
+
+                    <!-- Base Unit Card -->
+                    <div class="bg-slate-50 border rounded-xl p-4 space-y-3">
+                        <div class="font-bold text-slate-800 text-sm flex justify-between">
+                            <span>基本單位庫存設定</span>
+                            <span class="text-xs font-mono text-blue-600">編碼結尾: -0</span>
+                        </div>
+                        <div class="grid grid-cols-4 gap-3">
+                            <div>
+                                <label class="block text-xs font-medium text-slate-600 mb-1">基本單位名稱</label>
+                                <input v-model="editingProduct.baseUnit" placeholder="個" class="w-full border rounded-lg p-2 bg-white">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-slate-600 mb-1">單賣售價 ($)</label>
+                                <input v-model.number="editingProduct.basePrice" type="number" class="w-full border rounded-lg p-2 bg-white">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-slate-600 mb-1">初始基本庫存</label>
+                                <input v-model.number="editingProduct.stock" type="number" class="w-full border rounded-lg p-2 bg-white">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-slate-600 mb-1">安全庫存警戒值</label>
+                                <input v-model.number="editingProduct.minStock" type="number" class="w-full border rounded-lg p-2 bg-white">
+                            </div>
+                        </div>
+                        <label class="flex items-center gap-2 pt-2 cursor-pointer text-xs font-semibold text-slate-700">
+                            <input type="checkbox" v-model="editingProduct.restrictBulkOnly" class="rounded text-blue-600">
+                            <span>限制不可拆箱/散賣 (銷貨時只能選擇大包裝規格整箱出貨)</span>
+                        </label>
+                    </div>
+
+                    <!-- Custom Tiers -->
+                    <div class="space-y-3">
+                        <div class="flex justify-between items-center">
+                            <span class="font-bold text-slate-800">自訂多包裝規格階層 (包裝號由 1 遞增)</span>
+                            <button @click="addPackageTier" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 text-xs px-3 py-1.5 rounded-lg font-bold">
+                                + 新增包裝階層
+                            </button>
+                        </div>
+
+                        <div v-for="(tier, idx) in editingProduct.packageTiers" :key="idx" class="bg-slate-50 border rounded-xl p-4 relative space-y-3">
+                            <button @click="removePackageTier(idx)" class="absolute top-3 right-3 text-slate-400 hover:text-red-500">🗑️</button>
+                            <div class="grid grid-cols-3 gap-3">
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-600 mb-1">包裝規格名稱 *</label>
+                                    <input v-model="tier.name" placeholder="例: 中盒 (12個)" class="w-full border rounded-lg p-2 bg-white">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-600 mb-1">折算基本單位數量 *</label>
+                                    <input v-model.number="tier.ratio" type="number" class="w-full border rounded-lg p-2 bg-white">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-600 mb-1">自動推算包裝編碼</label>
+                                    <input :value="previewTierCode(idx + 1)" readonly class="w-full border rounded-lg p-2 bg-slate-100 font-mono text-blue-600 font-bold">
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-600 mb-1">標準售價 ($)</label>
+                                    <input v-model.number="tier.price" type="number" class="w-full border rounded-lg p-2 bg-white">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-600 mb-1">預設折讓折扣 ($)</label>
+                                    <input v-model.number="tier.discount" type="number" class="w-full border rounded-lg p-2 bg-white">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-end gap-3 pt-4 border-t">
+                    <button @click="showProductModal = false" class="px-5 py-2.5 border rounded-xl text-slate-600 font-medium">取消</button>
+                    <button @click="saveProduct" class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow">儲存商品資料</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- RECEIPT & QR CODE PRINT MODAL -->
+        <div v-if="showReceiptModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl p-6 space-y-6 max-h-[95vh] overflow-y-auto">
+                <div class="flex justify-between items-center border-b pb-3 no-print">
+                    <h3 class="font-bold text-lg text-slate-800">單據 / 貼紙預覽</h3>
+                    <div class="flex gap-2">
+                        <button @click="printReceipt" class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2 rounded-lg font-bold flex items-center gap-1">
+                            🖨️ 列印本頁
+                        </button>
+                        <button @click="showReceiptModal = false" class="bg-slate-200 text-slate-700 text-sm px-4 py-2 rounded-lg font-bold">
+                            ✕ 關閉離開
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Printable Area -->
+                <div id="printable-area" class="p-8 bg-white border rounded-xl space-y-8">
+                    <div class="flex justify-between items-start border-b pb-4">
+                        <div>
+                            <h1 class="text-2xl font-bold text-slate-900">銷貨出貨單據</h1>
+                            <p class="text-xs text-slate-500 font-mono mt-1">單號：{{ currentReceipt.id }}</p>
+                        </div>
+                        <div class="text-right">
+                            <h2 class="text-lg font-bold text-slate-800">智慧庫存管理系統</h2>
+                            <p class="text-xs text-slate-500 mt-1">出貨日期：{{ currentReceipt.dateStr }}</p>
+                        </div>
+                    </div>
+
+                    <div class="bg-slate-50 p-4 rounded-xl flex justify-between items-center border">
+                        <div>
+                            <span class="text-xs text-slate-400 block">客戶 / 買方單位：</span>
+                            <span class="font-bold text-slate-800 text-base">一般客戶</span>
+                        </div>
+                        <div class="text-right">
+                            <span class="text-xs text-slate-400 block">單據狀態：</span>
+                            <span class="bg-emerald-100 text-emerald-700 text-xs px-2.5 py-1 rounded-full font-bold">已順利完成扣庫</span>
+                        </div>
+                    </div>
+
+                    <table class="w-full text-left text-sm">
+                        <thead class="border-b text-slate-500 font-bold">
+                            <tr>
+                                <th class="py-2">#</th>
+                                <th class="py-2">商品名稱</th>
+                                <th class="py-2">包裝規格</th>
+                                <th class="py-2">數量</th>
+                                <th class="py-2">單價</th>
+                                <th class="py-2 text-right">小計</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y">
+                            <tr v-for="(item, idx) in currentReceipt.items" :key="idx" class="py-2">
+                                <td class="py-3 text-slate-400">{{ idx + 1 }}</td>
+                                <td class="py-3 font-bold text-slate-800">{{ item.name }}</td>
+                                <td class="py-3 text-slate-600">{{ item.pkgName }}</td>
+                                <td class="py-3 font-bold">{{ item.qty }}</td>
+                                <td class="py-3">${{ item.price }}</td>
+                                <td class="py-3 text-right font-bold">${{ item.price * item.qty }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <div class="flex justify-end border-t pt-4">
+                        <div class="w-64 space-y-1.5 text-sm text-right">
+                            <div class="flex justify-between text-slate-500">
+                                <span>小計金額：</span>
+                                <span>${{ currentReceipt.totalPrice }}</span>
+                            </div>
+                            <div class="flex justify-between text-indigo-600">
+                                <span>折讓 / 折扣：</span>
+                                <span>-$0</span>
+                            </div>
+                            <div class="flex justify-between text-xl font-extrabold text-slate-900 border-t pt-2">
+                                <span>實收總計：</span>
+                                <span>${{ currentReceipt.totalPrice }}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-12 pt-12 text-center text-xs text-slate-400">
+                        <div class="border-t pt-2">出貨倉管人員簽章</div>
+                        <div class="border-t pt-2">客戶簽收</div>
+                    </div>
+
+                    <div class="border-t pt-6 space-y-4">
+                        <h3 class="font-bold text-base text-slate-800">商品規格專屬 QR Code 標籤頁 (全自動繪製)</h3>
+                        <div class="flex flex-wrap gap-4">
+                            <div v-for="(item, idx) in currentReceipt.items" :key="idx" class="border-2 border-slate-800 rounded-xl p-3 w-48 text-center space-y-2 bg-white">
+                                <div class="font-bold text-xs text-slate-900 line-clamp-1">{{ item.name }}</div>
+                                <div class="text-[10px] text-slate-500">規格：{{ item.pkgName }}</div>
+                                <div class="text-[9px] font-mono font-bold text-blue-600">{{ item.qrCodeStr }}</div>
+                                <div :id="'qrcode-' + idx" class="flex justify-center py-1"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Vue 3 App Logic -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script>
+        const { createApp, nextTick } = Vue;
+
+        createApp({
+            data() {
+                return {
+                    currentTab: 'inventory',
+                    lastSaveTime: '',
+                    searchQuery: '',
+                    selectedCategoryFilter: '',
+                    selectedProducts: [],
+                    
+                    products: [],
+                    categories: [],
+                    cart: [],
+                    history: [],
+
+                    toast: { show: false, msg: '', icon: '' },
+                    inboundForm: { productId: '', qty: 1, totalCost: 0 },
+                    inboundSearch: '',
+                    outboundSearch: '',
+                    newCategoryName: '',
+
+                    showProductModal: false,
+                    editingProduct: {},
+
+                    showReceiptModal: false,
+                    currentReceipt: {},
+
+                    isScanning: false,
+                    html5QrcodeScanner: null,
+                    scanTarget: 'outbound'
+                }
+            },
+            computed: {
+                filteredProducts() {
+                    return this.products.filter(p => {
+                        const code = this.getAutoCode(p, null);
+                        const matchesSearch = p.name.includes(this.searchQuery) || code.includes(this.searchQuery);
+                        const matchesCat = !this.selectedCategoryFilter || p.category === this.selectedCategoryFilter;
+                        return matchesSearch && matchesCat;
+                    });
+                },
+                inboundFilteredProducts() {
+                    return this.products.filter(p => {
+                        const code = this.getAutoCode(p, null);
+                        return p.name.includes(this.inboundSearch) || code.includes(this.inboundSearch);
+                    });
+                },
+                isAllSelected() {
+                    return this.filteredProducts.length > 0 && this.selectedProducts.length === this.filteredProducts.length;
+                },
+                selectedInboundProduct() {
+                    return this.products.find(p => p.id === this.inboundForm.productId);
+                },
+                calculatedCurrentUnitCost() {
+                    if (!this.inboundForm.qty || this.inboundForm.qty <= 0) return 0;
+                    return (this.inboundForm.totalCost || 0) / this.inboundForm.qty;
+                },
+                calculatedNewAvgCost() {
+                    const p = this.selectedInboundProduct;
+                    if (!p) return 0;
+                    const oldStock = p.stock || 0;
+                    const oldCost = p.avgCost || 0;
+                    const addQty = this.inboundForm.qty || 0;
+                    const addCost = this.inboundForm.totalCost || 0;
+
+                    const totalStock = oldStock + addQty;
+                    if (totalStock <= 0) return 0;
+                    return ((oldStock * oldCost) + addCost) / totalStock;
+                },
+                availableSubcategories() {
+                    const cat = this.categories.find(c => c.name === this.editingProduct.category);
+                    return cat ? (cat.subcategories || []) : [];
+                },
+                outboundFilteredProducts() {
+                    return this.products.filter(p => {
+                        const code = this.getAutoCode(p, null);
+                        return p.name.includes(this.outboundSearch) || code.includes(this.outboundSearch);
+                    });
+                },
+                cartTotalCount() {
+                    return this.cart.reduce((sum, item) => sum + item.qty, 0);
+                },
+                cartTotalPrice() {
+                    return this.cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
+                },
+                previewBaseCode() {
+                    return this.computeAutoCode(this.editingProduct.category, this.editingProduct.subcategory, this.editingProduct.seq || 1, 0);
+                }
+            },
+            mounted() {
+                this.loadData();
+                if (this.products.length === 0) this.initDefaultData();
+            },
+            methods: {
+                pad2(n) { return String(n).padStart(2, '0'); },
+                pad3(n) { return String(n).padStart(3, '0'); },
+
+                computeAutoCode(catName, subName, seq, pkgIdx = 0) {
+                    let catCode = '00';
+                    let subCode = '00';
+
+                    if (catName && catName !== '未分類') {
+                        const cIdx = this.categories.findIndex(c => c.name === catName);
+                        if (cIdx !== -1) {
+                            catCode = this.pad2(cIdx + 1);
+                            const cat = this.categories[cIdx];
+                            if (subName && cat.subcategories) {
+                                const sIdx = cat.subcategories.indexOf(subName);
+                                if (sIdx !== -1) subCode = this.pad2(sIdx + 1);
+                            }
+                        }
+                    }
+
+                    return `${catCode}-${subCode}-${this.pad3(seq || 1)}-${pkgIdx}`;
+                },
+
+                getAutoCode(prod, tier = null, tierIndex = null) {
+                    const pkgIdx = tier ? (tierIndex || 1) : 0;
+                    return this.computeAutoCode(prod.category, prod.subcategory, prod.seq || 1, pkgIdx);
+                },
+
+                previewTierCode(pkgIdx) {
+                    return this.computeAutoCode(this.editingProduct.category, this.editingProduct.subcategory, this.editingProduct.seq || 1, pkgIdx);
+                },
+
+                showToast(msg, icon = 'fa-solid fa-circle-check') {
+                    this.toast = { show: true, msg, icon };
+                    setTimeout(() => { this.toast.show = false; }, 3000);
+                },
+                saveData() {
+                    const data = { products: this.products, categories: this.categories, history: this.history, cart: this.cart };
+                    localStorage.setItem('inventory_spa_v5_data', JSON.stringify(data));
+                    this.lastSaveTime = new Date().toLocaleTimeString();
+                },
+                loadData() {
+                    const raw = localStorage.getItem('inventory_spa_v5_data');
+                    if (raw) {
+                        try {
+                            const parsed = JSON.parse(raw);
+                            this.products = parsed.products || [];
+                            this.categories = parsed.categories || [];
+                            this.history = parsed.history || [];
+                            this.cart = parsed.cart || [];
+                        } catch (e) { console.error(e); }
+                    }
+                },
+                initDefaultData() {
+                    this.categories = [
+                        { id: '1', name: '3C 數位', subcategories: ['藍牙設備', '配件'] },
+                        { id: '2', name: '生活用品', subcategories: ['杯具', '收納'] }
+                    ];
+                    this.products = [
+                        {
+                            id: 'p1', seq: 1, name: '無線藍牙耳機 Pro', category: '3C 數位', subcategory: '藍牙設備', storageTag: 'A-01-2',
+                            baseUnit: '件', basePrice: 1200, stock: 50, avgCost: 750, minStock: 10, restrictBulkOnly: false,
+                            packageTiers: [
+                                { id: 't1', name: '中盒 (10件)', ratio: 10, price: 11000 }
+                            ]
+                        }
+                    ];
+                    this.saveData();
+                },
+                toggleSelectAll() {
+                    this.selectedProducts = this.isAllSelected ? [] : this.filteredProducts.map(p => p.id);
+                },
+                deleteProduct(id) {
+                    if (confirm('確定刪除此商品嗎？')) {
+                        this.products = this.products.filter(p => p.id !== id);
+                        this.saveData();
+                        this.showToast('商品已成功刪除');
+                    }
+                },
+                bulkDeleteProducts() {
+                    if (confirm(`確定刪除所選的 ${this.selectedProducts.length} 項商品？`)) {
+                        this.products = this.products.filter(p => !this.selectedProducts.includes(p.id));
+                        this.selectedProducts = [];
+                        this.saveData();
+                        this.showToast('批量刪除成功！');
+                    }
+                },
+                openProductModal(prod = null) {
+                    if (prod) {
+                        this.editingProduct = JSON.parse(JSON.stringify(prod));
+                    } else {
+                        const nextSeq = this.products.length + 1;
+                        this.editingProduct = {
+                            id: '', seq: nextSeq, name: '', category: '未分類', subcategory: '', storageTag: '',
+                            baseUnit: '個', basePrice: 0, stock: 0, avgCost: 0, minStock: 5, restrictBulkOnly: false, packageTiers: []
+                        };
+                    }
+                    this.showProductModal = true;
+                },
+                addPackageTier() {
+                    this.editingProduct.packageTiers.push({ id: 't_' + Date.now(), name: '', ratio: 10, price: 0, discount: 0 });
+                },
+                removePackageTier(idx) {
+                    this.editingProduct.packageTiers.splice(idx, 1);
+                },
+                saveProduct() {
+                    if (!this.editingProduct.name) return alert('請輸入商品名稱');
+                    if (this.editingProduct.id) {
+                        const idx = this.products.findIndex(p => p.id === this.editingProduct.id);
+                        if (idx !== -1) this.products[idx] = this.editingProduct;
+                    } else {
+                        this.editingProduct.id = 'p_' + Date.now();
+                        this.products.push(this.editingProduct);
+                    }
+                    this.showProductModal = false;
+                    this.saveData();
+                    this.showToast('商品資料與自動編碼儲存成功！');
+                },
+                submitInbound() {
+                    if (!this.inboundForm.productId) return alert('請選擇商品');
+                    if (!this.inboundForm.qty || this.inboundForm.qty <= 0) return alert('請填寫有效進貨數量');
+
+                    const prod = this.selectedInboundProduct;
+                    const addQty = this.inboundForm.qty;
+                    const newAvg = this.calculatedNewAvgCost;
+
+                    prod.avgCost = newAvg;
+                    prod.stock += addQty;
+
+                    this.saveData();
+                    this.showToast(`入庫成功！${prod.name} +${addQty}${prod.baseUnit}，新加權成本: $${newAvg.toFixed(1)}`);
+                    this.inboundForm = { productId: '', qty: 1, totalCost: 0 };
+                },
+                addToCart(prod, tier, tierIndex = 0) {
+                    const pkgName = tier ? tier.name : '單件';
+                    const price = tier ? tier.price : (prod.basePrice || 0);
+                    const ratio = tier ? tier.ratio : 1;
+                    const qrStr = this.getAutoCode(prod, tier, tierIndex);
+
+                    const existing = this.cart.find(c => c.id === prod.id && c.pkgName === pkgName);
+                    if (existing) {
+                        existing.qty += 1;
+                    } else {
+                        this.cart.push({ id: prod.id, name: prod.name, pkgName, price, ratio, qty: 1, qrCodeStr: qrStr });
+                    }
+                    this.showToast(`已加至購物車: ${prod.name} (${pkgName})`);
+                },
+                updateCartQty(item, dir) {
+                    item.qty += dir;
+                    if (item.qty <= 0) {
+                        this.cart = this.cart.filter(c => c !== item);
+                    }
+                },
+                checkout() {
+                    for (let item of this.cart) {
+                        const p = this.products.find(prod => prod.id === item.id);
+                        if (p) p.stock -= (item.qty * item.ratio);
+                    }
+
+                    const rec = {
+                        id: 'INV-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + Math.floor(1000 + Math.random() * 9000),
+                        dateStr: new Date().toLocaleString(),
+                        items: JSON.parse(JSON.stringify(this.cart)),
+                        totalPrice: this.cartTotalPrice,
+                        customer: '一般客戶'
+                    };
+
+                    this.history.unshift(rec);
+                    this.cart = [];
+                    this.saveData();
+                    this.openReceiptModal(rec);
+                },
+                openReceiptModal(rec) {
+                    this.currentReceipt = rec;
+                    this.showReceiptModal = true;
+
+                    nextTick(() => {
+                        rec.items.forEach((item, idx) => {
+                            const el = document.getElementById('qrcode-' + idx);
+                            if (el) {
+                                el.innerHTML = '';
+                                new QRCode(el, {
+                                    text: item.qrCodeStr,
+                                    width: 80,
+                                    height: 80
+                                });
+                            }
+                        });
+                    });
+                },
+                printReceipt() {
+                    window.print();
+                },
+                addCategory() {
+                    if (!this.newCategoryName) return;
+                    this.categories.push({ id: Date.now().toString(), name: this.newCategoryName, subcategories: [] });
+                    this.newCategoryName = '';
+                    this.saveData();
+                },
+                deleteCategory(id) {
+                    const cat = this.categories.find(c => c.id === id);
+                    if (!cat) return;
+                    this.products.forEach(p => { if (p.category === cat.name) { p.category = '未分類'; p.subcategory = ''; } });
+                    this.categories = this.categories.filter(c => c.id !== id);
+                    this.saveData();
+                    this.showToast('已刪除類別，商品已自動劃歸至「未分類 (00)」');
+                },
+                addSubcategory(cat) {
+                    if (!cat.tempSubName) return;
+                    if (!cat.subcategories) cat.subcategories = [];
+                    cat.subcategories.push(cat.tempSubName);
+                    cat.tempSubName = '';
+                    this.saveData();
+                },
+                deleteSubcategory(cat, subName) {
+                    cat.subcategories = cat.subcategories.filter(s => s !== subName);
+                    this.products.forEach(p => {
+                        if (p.category === cat.name && p.subcategory === subName) p.subcategory = '';
+                    });
+                    this.saveData();
+                },
+                startScanner(target) {
+                    this.scanTarget = target;
+                    this.isScanning = true;
+                    nextTick(() => {
+                        this.html5QrcodeScanner = new Html5Qrcode("reader");
+                        this.html5QrcodeScanner.start(
+                            { facingMode: "environment" },
+                            { fps: 10, qrbox: { width: 250, height: 250 } },
+                            (decodedText) => {
+                                this.handleScanResult(decodedText);
+                                this.stopScanner();
+                            },
+                            () => {}
+                        );
+                    });
+                },
+                stopScanner() {
+                    if (this.html5QrcodeScanner) {
+                        this.html5QrcodeScanner.stop().then(() => {
+                            this.isScanning = false;
+                        }).catch(() => { this.isScanning = false; });
+                    } else {
+                        this.isScanning = false;
+                    }
+                },
+                handleScanResult(code) {
+                    let matchedProd = null;
+                    let matchedTier = null;
+                    let matchedTierIdx = 0;
+
+                    for (let p of this.products) {
+                        if (this.getAutoCode(p, null) === code) {
+                            matchedProd = p;
+                            break;
+                        }
+                        for (let tIdx = 0; tIdx < p.packageTiers.length; tIdx++) {
+                            let t = p.packageTiers[tIdx];
+                            if (this.getAutoCode(p, t, tIdx + 1) === code) {
+                                matchedProd = p;
+                                matchedTier = t;
+                                matchedTierIdx = tIdx + 1;
+                                break;
+                            }
+                        }
+                        if (matchedProd) break;
+                    }
+
+                    if (matchedProd) {
+                        if (this.scanTarget === 'outbound') {
+                            this.addToCart(matchedProd, matchedTier, matchedTierIdx);
+                        } else if (this.scanTarget === 'inbound') {
+                            this.inboundForm.productId = matchedProd.id;
+                            this.showToast(`掃描成功：已選取 ${matchedProd.name}`);
+                        }
+                    } else {
+                        alert(`未找到自動編碼 [${code}] 對應的商品或規格`);
+                    }
+                }
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
